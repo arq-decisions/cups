@@ -1,0 +1,227 @@
+<!doctype html>
+<html lang="de">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Participants</title>
+<style>
+  :root{
+    --bg:#0b0f14; --fg:#e9eef5; --muted:#9fb0c3; --accent:#4ea1ff; --card:#121822; --chip:#1b2431; --border:#233143;
+  }
+  body{margin:0;font-family:Inter,system-ui,Segoe UI,Roboto,Arial,sans-serif;background:var(--bg);color:var(--fg)}
+  .wrap{max-width:800px;margin:0 auto;padding:16px}
+  .header{display:flex;gap:12px;align-items:center;flex-wrap:wrap;margin-bottom:12px}
+  h1{font-size:18px;margin:0}
+  .pill{background:var(--chip);padding:6px 10px;border-radius:999px;color:var(--muted);font-size:12px}
+  .tools{margin-left:auto;display:flex;gap:8px}
+  .search{background:var(--card);border:1px solid var(--border);color:var(--fg);padding:8px 10px;border-radius:8px;outline:none}
+  .table{width:100%;border-collapse:separate;border-spacing:0;margin-top:8px;background:var(--card);border:1px solid var(--border);border-radius:10px;overflow:hidden}
+  th,td{padding:10px 12px;text-align:left;border-bottom:1px solid var(--border);font-size:14px}
+  th{background:#0f1622;position:sticky;top:0;z-index:1;cursor:pointer;user-select:none}
+  tr:hover td{background:#0e141e}
+  .foot{display:flex;justify-content:space-between;align-items:center;color:var(--muted);font-size:12px;margin-top:10px}
+  .btn{background:var(--chip);color:var(--fg);border:1px solid var(--border);padding:6px 10px;border-radius:8px;cursor:pointer}
+  .spinner{display:inline-block;width:18px;height:18px;border:3px solid var(--border);border-top-color:var(--accent);border-radius:50%;animation:spin 1s linear infinite;margin-right:8px}
+  @keyframes spin{to{transform:rotate(360deg)}}
+  .err{color:#ff8a8a}
+  .note{color:var(--muted);font-size:12px;margin-top:6px}
+</style>
+</head>
+<body>
+<div class="wrap">
+  <div class="header">
+    <h1 id="title">Cup Participants</h1>
+    <span class="pill" id="meta">lädt…</span>
+    <div class="tools">
+      <input id="search" class="search" placeholder="Suchen… (⌘/Ctrl+K)" />
+      <button id="dl" class="btn" title="Gefilterte Ansicht als CSV herunterladen">CSV</button>
+    </div>
+  </div>
+
+  <div id="status" class="note"><span class="spinner"></span>Daten werden geladen…</div>
+  <table id="tbl" class="table" hidden>
+    <thead><tr id="thead"></tr></thead>
+    <tbody id="tbody"></tbody>
+  </table>
+  <div class="foot" id="foot" hidden>
+    <div id="count"></div>
+    <div id="sortnote" class="note"></div>
+  </div>
+</div>
+
+<script>
+// Repo-spezifische Defaults
+const defaultDataURL = "https://raw.githubusercontent.com/arq-decisions/cups/main/cup_participants_extern.csv";
+const defaultTitle = "Cup Participants";
+const defaultColumns = ["user_name"];
+const defaultSort = { key: "user_name", dir: "asc" };
+
+// URL-Parameter (optional zur Überschreibung)
+const params = new URLSearchParams(location.search);
+const dataURL = params.get('data') || defaultDataURL;
+const titleParam = params.get('title') || defaultTitle;
+const columnsParam = (params.get('columns')||"").split(',').map(s=>s.trim()).filter(Boolean);
+const sortParam = params.get('sort'); // "col:asc|desc"
+const topN = parseInt(params.get('top')) || null;
+
+// DOM Elemente
+const statusEl = document.getElementById('status');
+const metaEl = document.getElementById('meta');
+const tableEl = document.getElementById('tbl');
+const theadEl = document.getElementById('thead');
+const tbodyEl = document.getElementById('tbody');
+const footEl = document.getElementById('foot');
+const countEl = document.getElementById('count');
+const sortnoteEl = document.getElementById('sortnote');
+const searchEl = document.getElementById('search');
+const dlBtn = document.getElementById('dl');
+document.getElementById('title').textContent = titleParam;
+
+// CSV Parser (einfach, ausreichend für 1 Spalte)
+function parseCSV(text) {
+  const lines = text.replace(/\\r/g,'').split('\\n').filter(l=>l.trim().length>0);
+  const headers = lines.shift().split(',').map(h=>h.trim());
+  const rows = lines.map(line=>{
+    const cells = line.split(',');
+    const obj = {};
+    headers.forEach((h,i)=> obj[h] = (cells[i] ?? '').trim());
+    return obj;
+  });
+  return {headers, rows};
+}
+
+function toCSV(rows, headers){
+  const esc = v => {
+    if (v == null) return '';
+    const s = String(v);
+    return /[",\\n]/.test(s) ? `"${s.replace(/"/g,'""')}"` : s;
+  };
+  return [headers.join(',')].concat(rows.map(r=>headers.map(h=>esc(r[h])).join(','))).join('\\n');
+}
+function download(name, content, mime='text/csv'){
+  const blob = new Blob([content], {type:mime});
+  const a = document.createElement('a');
+  a.href = URL.createObjectURL(blob);
+  a.download = name;
+  document.body.appendChild(a);
+  a.click();
+  a.remove();
+  setTimeout(()=>URL.revokeObjectURL(a.href), 5000);
+}
+
+let currentSort = {key:null, dir:'asc'};
+function sortRows(rows, key, dir){
+  const mul = dir === 'desc' ? -1 : 1;
+  return rows.slice().sort((a,b)=> String(a[key]).localeCompare(String(b[key])) * mul);
+}
+function attachSortHandlers(headers, rows){
+  Array.from(theadEl.children).forEach((th, idx)=>{
+    const key = headers[idx];
+    th.addEventListener('click', ()=>{
+      const dir = (currentSort.key === key && currentSort.dir === 'asc') ? 'desc' : 'asc';
+      currentSort = {key, dir};
+      renderBody(sortRows(filterRows(rows), key, dir), headers);
+      sortnoteEl.textContent = `sortiert nach ${key} (${dir})`;
+      footEl.hidden = false;
+    });
+  });
+}
+function rowMatchesQuery(row, q){
+  if (!q) return true;
+  const s = q.toLowerCase();
+  return Object.values(row).some(v => String(v ?? '').toLowerCase().includes(s));
+}
+function filterRows(rows){
+  const q = searchEl.value.trim();
+  return rows.filter(r => rowMatchesQuery(r, q));
+}
+function renderHead(headers){
+  theadEl.innerHTML = '';
+  headers.forEach(h=>{
+    const th = document.createElement('th');
+    th.textContent = h;
+    theadEl.appendChild(th);
+  });
+}
+function renderBody(rows, headers){
+  tbodyEl.innerHTML = '';
+  const limited = topN ? rows.slice(0, topN) : rows;
+  limited.forEach(r=>{
+    const tr = document.createElement('tr');
+    headers.forEach(h=>{
+      const td = document.createElement('td');
+      td.textContent = r[h] ?? '';
+      tr.appendChild(td);
+    });
+    tbodyEl.appendChild(tr);
+  });
+  countEl.textContent = `${limited.length} Teilnehmende` + (topN ? ` (Top ${topN})` : '');
+}
+
+(async function init(){
+  try{
+    const t0 = performance.now();
+    const res = await fetch(dataURL, {cache:'no-store'});
+    if (!res.ok) throw new Error(`HTTP ${res.status}`);
+    const raw = await res.text();
+    // Wir erwarten CSV (eine Spalte: user_name); einfache Auto-Erkennung, falls JSON kommt
+    let headers, rows;
+    if (/^\\s*[\\[{]/.test(raw)){
+      const json = JSON.parse(raw);
+      headers = Object.keys(json[0]||{});
+      rows = json;
+    } else {
+      const parsed = parseCSV(raw);
+      headers = parsed.headers;
+      rows = parsed.rows;
+    }
+
+    // Spaltenauswahl/Defaults
+    const cols = columnsParam.length ? columnsParam : defaultColumns;
+    headers = cols;
+    rows = rows.map(r => {
+      const o = {}; cols.forEach(k => o[k] = r[k]); return o;
+    });
+
+    // Sortier-Defaults
+    if (sortParam){
+      const [key,dir='asc'] = sortParam.split(':');
+      currentSort = {key, dir};
+      rows = sortRows(rows, key, dir);
+      sortnoteEl.textContent = `sortiert nach ${key} (${dir})`;
+      footEl.hidden = false;
+    } else {
+      rows = sortRows(rows, defaultSort.key, defaultSort.dir);
+      currentSort = defaultSort;
+      sortnoteEl.textContent = `sortiert nach ${defaultSort.key} (${defaultSort.dir})`;
+      footEl.hidden = false;
+    }
+
+    renderHead(headers);
+    renderBody(filterRows(rows), headers);
+    attachSortHandlers(headers, rows);
+    tableEl.hidden = false;
+
+    searchEl.addEventListener('input', ()=>{
+      const base = currentSort.key ? sortRows(rows, currentSort.key, currentSort.dir) : rows;
+      renderBody(filterRows(base), headers);
+    });
+
+    dlBtn.addEventListener('click', ()=>{
+      const base = currentSort.key ? sortRows(rows, currentSort.key, currentSort.dir) : rows;
+      const filtered = filterRows(base);
+      const csv = toCSV(filtered, headers);
+      download('cup-participants.csv', csv, 'text/csv');
+    });
+
+    const ms = Math.round(performance.now()-t0);
+    metaEl.textContent = `${rows.length} Zeilen • ${/^[\\s\\[{]/.test(raw)?'JSON':'CSV'} • ${ms} ms`;
+    statusEl.textContent = '';
+  } catch(err){
+    console.error(err);
+    statusEl.innerHTML = `<span class="err">Fehler:</span> ${err.message}`;
+  }
+})();
+</script>
+</body>
+</html>
